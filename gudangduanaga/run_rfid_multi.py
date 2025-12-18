@@ -6,7 +6,6 @@ Satu script untuk 4 gudang / 4 reader (atau jalanin 1 per proses).
 Kompatibel dengan pola Start/Stop via file kontrol JSON.
 
 Cara pakai (paling stabil):
-  # Jalankan 4 proses (4 CMD/terminal)
   python run_rfid_multi.py --reader zweena_reg
   python run_rfid_multi.py --reader dnk_gambiran_reg
   python run_rfid_multi.py --reader dnk_teblon_reg
@@ -20,9 +19,7 @@ Web/PHP cukup mengubah file:
 
 Catatan:
 - Setiap reader punya folder log sendiri, biar tidak saling overwrite.
-- EPC terakhir ditulis ke folder hasil (cross-platform):
-    static_files/_rfid_results/<reader>.txt
-  Bisa di-override via env: RFID_RESULT_DIR
+- EPC terakhir ditulis ke: C:\\rfid\\<reader>.txt
 """
 
 import os
@@ -36,69 +33,105 @@ import argparse
 from collections import deque
 from datetime import datetime
 
+# ============================================================
+# CRC16 Hopeland (cocok dengan contoh CMD_STOP & inventory kamu)
+#   poly = 0x8005, init = 0x0000, non-reflect, xorout = 0x0000
+#   output disusun big-endian (HI LO)
+# ============================================================
+CRC16_POLY = 0x8005
+CRC16_INIT = 0x0000
+
+def crc16_hopeland(data: bytes) -> int:
+    crc = CRC16_INIT
+    for b in data:
+        crc ^= (b << 8)
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ CRC16_POLY) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc & 0xFFFF
+
+def build_cmd_from_body(body: bytes) -> str:
+    """
+    body = bytes perintah TANPA 'AA' dan TANPA CRC.
+    return = string HEX ber-spasi: "AA <body...> <CRC_HI> <CRC_LO>"
+    """
+    crc = crc16_hopeland(body)
+    crc_hi = (crc >> 8) & 0xFF
+    crc_lo = crc & 0xFF
+    full = bytes([0xAA]) + body + bytes([crc_hi, crc_lo])
+    return " ".join(f"{x:02X}" for x in full)
+
+def build_inventory_cmd(ant_mask: int) -> str:
+    """
+    Inventory continuous read EPC:
+    body = 02 10 00 02 01 <ant_mask>
+    ant_mask: ANT1=0x01, ANT2=0x02, ANT3=0x04, ANT4=0x08, ALL(1-4)=0x0F
+    """
+    body = bytes([0x02, 0x10, 0x00, 0x02, 0x01, ant_mask & 0xFF])
+    return build_cmd_from_body(body)
+
 # =======================
 # PROFIL READER / GUDANG
 # =======================
+# NOTE:
+# - epc_cmds kini SUDAH BENAR per antena (mask 01/02/04/08).
+# - Ini memastikan worker round-robin benar-benar membaca ANT1..ANT4.
 READER_PROFILES = {
-    # 1) Produksi CV. Zweena Adi Nugraha (Registrasi)
     "zweena_reg": {
         "label": "CV. Zweena Adi Nugraha (Registrasi)",
         "ip": "172.16.36.4",
         "port": 8282,
         "ant_count": 4,
-        # Command inventory per antena (isi HEX resmi Hopeland HF340)
         "epc_cmds": {
-            1: "AA 02 10 00 02 01 01 71 AD",
-            2: "AA 02 10 00 02 01 01 71 AD",
-            3: "AA 02 10 00 02 01 01 71 AD",
-            4: "AA 02 10 00 02 01 01 71 AD",
+            1: build_inventory_cmd(0x01),
+            2: build_inventory_cmd(0x02),
+            3: build_inventory_cmd(0x04),
+            4: build_inventory_cmd(0x08),
         },
         "ant_status": {1: "Masuk", 2: "Masuk", 3: "Masuk", 4: "Masuk"},
     },
 
-    # 2) PT. Dua Naga Kosmetindo - Gambiran (Registrasi)
     "dnk_gambiran_reg": {
         "label": "PT. Dua Naga Kosmetindo - Gambiran (Registrasi)",
         "ip": "172.16.26.34",
         "port": 8686,
         "ant_count": 4,
         "epc_cmds": {
-            1: "AA 02 10 00 02 01 01 71 AD",
-            2: "AA 02 10 00 02 01 01 71 AD",
-            3: "AA 02 10 00 02 01 01 71 AD",
-            4: "AA 02 10 00 02 01 01 71 AD",
+            1: build_inventory_cmd(0x01),
+            2: build_inventory_cmd(0x02),
+            3: build_inventory_cmd(0x04),
+            4: build_inventory_cmd(0x08),
         },
         "ant_status": {1: "Masuk", 2: "Masuk", 3: "Masuk", 4: "Masuk"},
     },
 
-    # 3) PT. Dua Naga Kosmetindo - Teblon (Registrasi)
     "dnk_teblon_reg": {
         "label": "PT. Dua Naga Kosmetindo - Teblon (Registrasi)",
         "ip": "172.16.33.189",
         "port": 8787,
         "ant_count": 4,
         "epc_cmds": {
-            1: "AA 02 10 00 02 01 01 71 AD",
-            2: "AA 02 10 00 02 01 01 71 AD",
-            3: "AA 02 10 00 02 01 01 71 AD",
-            4: "AA 02 10 00 02 01 01 71 AD",
+            1: build_inventory_cmd(0x01),
+            2: build_inventory_cmd(0x02),
+            3: build_inventory_cmd(0x04),
+            4: build_inventory_cmd(0x08),
         },
         "ant_status": {1: "Masuk", 2: "Masuk", 3: "Masuk", 4: "Masuk"},
     },
 
-    # 4) Gudang Central (Barang Masuk & Keluar)
     "central_inout": {
         "label": "Gudang Central (In/Out - Multi Company)",
         "ip": "172.16.39.248",
         "port": 8383,
         "ant_count": 4,
         "epc_cmds": {
-            1: "AA 02 10 00 02 01 01 71 AD",
-            2: "AA 02 10 00 02 01 01 71 AD",
-            3: "AA 02 10 00 02 01 01 71 AD",
-            4: "AA 02 10 00 02 01 01 71 AD",
+            1: build_inventory_cmd(0x01),
+            2: build_inventory_cmd(0x02),
+            3: build_inventory_cmd(0x04),
+            4: build_inventory_cmd(0x08),
         },
-        # contoh mapping: silakan sesuaikan sesuai jalur gate/antena
         "ant_status": {1: "Masuk", 2: "Keluar", 3: "Masuk", 4: "Keluar"},
     },
 }
@@ -106,6 +139,7 @@ READER_PROFILES = {
 # =======================
 # KONFIG UMUM
 # =======================
+# Stop command kamu (tetap)
 CMD_STOP = "AA 02 FF 00 00 A4 0F"
 
 POLL_TIMEOUT_S   = 0.015
@@ -118,16 +152,9 @@ SO_RCVBUF        = 1 << 20
 PRINT_EACH_EVENT = True
 REPORT_INTERVAL_SEC = 1.0
 
-# Root log folder (di samping file ini)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_ROOT = os.path.join(BASE_DIR, "static_files")
-
-# Folder output EPC terakhir per reader (Linux/Windows friendly)
-# Default: <project>/static_files/_rfid_results
-RFID_RESULT_DIR = os.environ.get(
-    "RFID_RESULT_DIR",
-    os.path.join(STATIC_ROOT, "_rfid_results"),
-)
+RFID_WIN_DIR = r"C:\rfid"  # EPC terakhir per reader disimpan di sini (Windows)
 
 def norm_hex(s: str) -> str:
     return (s or "").replace(" ", "").upper()
@@ -174,7 +201,6 @@ class ReaderClient:
         s.connect((self.ip, self.port))
         s.setblocking(False)
         self.sock = s
-        # sinkron awal
         self.send_hex(CMD_STOP)
 
     def close(self):
@@ -315,7 +341,6 @@ class AsyncLogger(threading.Thread):
 
         self.log_active = True  # OFF saat STOP
 
-        # header CSV bila file baru
         if os.path.getsize(self.paths["csv"]) == 0:
             self.csv_w.writerow(["timestamp", "reader", "antenna", "epc", "code", "rssi_raw", "keterangan"])
 
@@ -338,7 +363,6 @@ class AsyncLogger(threading.Thread):
         except Exception as e:
             print(f"[{self.label}] [LOGGER] Gagal reset latest:", e)
 
-        # kosongkan EPC terakhir
         try:
             ensure_dirs(os.path.dirname(self.paths["result"]))
             with open(self.paths["result"], "w", encoding="utf-8") as f:
@@ -385,7 +409,6 @@ class AsyncLogger(threading.Thread):
             if PRINT_EACH_EVENT:
                 print(f"[{self.label}] [READ] ANT{ant} EPC={epc} RSSI={rssi} {ket}")
 
-            # EPC terakhir (buat dibaca PHP)
             try:
                 ensure_dirs(os.path.dirname(self.paths["result"]))
                 with open(self.paths["result"], "w", encoding="utf-8") as f:
@@ -448,14 +471,9 @@ class ReaderWorker(threading.Thread):
         self.stop_event.set()
 
     def _paths(self):
-        """
-        Semua file dipisah per reader:
-          static_files/<reader_key>/...
-          static_files/_rfid_results/<reader_key>.txt
-        """
         work = os.path.join(STATIC_ROOT, self.reader_key)
         ensure_dirs(work)
-        ensure_dirs(RFID_RESULT_DIR)
+        ensure_dirs(RFID_WIN_DIR)
 
         return {
             "work": work,
@@ -464,7 +482,7 @@ class ReaderWorker(threading.Thread):
             "jsonl": os.path.join(work, "read_log.jsonl"),
             "latest": os.path.join(work, "reads_latest.json"),
             "ctrl": os.path.join(work, "rfid_control.json"),
-            "result": os.path.join(RFID_RESULT_DIR, f"{self.reader_key}.txt"),
+            "result": os.path.join(RFID_WIN_DIR, f"{self.reader_key}.txt"),
         }
 
     def _ensure_files(self, paths):
@@ -503,7 +521,7 @@ class ReaderWorker(threading.Thread):
         ant_count = int(self.cfg.get("ant_count", 4))
         epc_cmds_cfg = self.cfg.get("epc_cmds", {})
 
-        # build cmd cycle
+        # build cmd cycle (ANT1..ANT4)
         cmd_cycle = []
         for ant in range(1, ant_count + 1):
             cmd = epc_cmds_cfg.get(ant)
@@ -520,7 +538,9 @@ class ReaderWorker(threading.Thread):
         print(f"Control file: {paths['ctrl']}")
         print(f"Latest file:  {paths['latest']}")
         print(f"EPC result:   {paths['result']}")
-        print("[INIT] Command cycle:", [f"ANT{a}" for a,_ in cmd_cycle])
+        print("[INIT] Command cycle:")
+        for a, c in cmd_cycle:
+            print(f"   ANT{a} -> {c}")
 
         rc = ReaderClient(ip, port)
 
@@ -563,7 +583,7 @@ class ReaderWorker(threading.Thread):
                         time.sleep(0.3)
                         continue
 
-                # send inventory round-robin
+                # send inventory round-robin ANT1..ANT4
                 for _ in range(SEND_ROUNDS):
                     ant, cmd = cmd_cycle[cycle_idx % len(cmd_cycle)]
                     ok = rc.send_hex(cmd)
