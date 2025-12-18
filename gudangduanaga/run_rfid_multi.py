@@ -20,7 +20,9 @@ Web/PHP cukup mengubah file:
 
 Catatan:
 - Setiap reader punya folder log sendiri, biar tidak saling overwrite.
-- EPC terakhir ditulis ke: C:\rfid\<reader>.txt
+- EPC terakhir ditulis ke folder hasil (cross-platform):
+    static_files/_rfid_results/<reader>.txt
+  Bisa di-override via env: RFID_RESULT_DIR
 """
 
 import os
@@ -119,7 +121,13 @@ REPORT_INTERVAL_SEC = 1.0
 # Root log folder (di samping file ini)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_ROOT = os.path.join(BASE_DIR, "static_files")
-RFID_WIN_DIR = r"C:\rfid"  # EPC terakhir per reader disimpan di sini (Windows)
+
+# Folder output EPC terakhir per reader (Linux/Windows friendly)
+# Default: <project>/static_files/_rfid_results
+RFID_RESULT_DIR = os.environ.get(
+    "RFID_RESULT_DIR",
+    os.path.join(STATIC_ROOT, "_rfid_results"),
+)
 
 def norm_hex(s: str) -> str:
     return (s or "").replace(" ", "").upper()
@@ -443,11 +451,11 @@ class ReaderWorker(threading.Thread):
         """
         Semua file dipisah per reader:
           static_files/<reader_key>/...
-          C:\rfid\<reader_key>.txt
+          static_files/_rfid_results/<reader_key>.txt
         """
         work = os.path.join(STATIC_ROOT, self.reader_key)
         ensure_dirs(work)
-        ensure_dirs(RFID_WIN_DIR)
+        ensure_dirs(RFID_RESULT_DIR)
 
         return {
             "work": work,
@@ -456,7 +464,7 @@ class ReaderWorker(threading.Thread):
             "jsonl": os.path.join(work, "read_log.jsonl"),
             "latest": os.path.join(work, "reads_latest.json"),
             "ctrl": os.path.join(work, "rfid_control.json"),
-            "result": os.path.join(RFID_WIN_DIR, f"{self.reader_key}.txt"),
+            "result": os.path.join(RFID_RESULT_DIR, f"{self.reader_key}.txt"),
         }
 
     def _ensure_files(self, paths):
