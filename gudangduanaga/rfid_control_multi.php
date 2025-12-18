@@ -52,7 +52,7 @@ if (file_exists($ctrlPath)) {
 // 3) Konfigurasi Python & Script
 // -----------------------------
 // Path ke Python di Windows (hasil "where python")
-$pythonPath = '/usr/bin/python3e';
+$pythonPath = '/usr/bin/python3';
 
 // Prioritas script:
 // 1) run_rfid_multi.py (disarankan)
